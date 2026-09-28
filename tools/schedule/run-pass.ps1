@@ -17,14 +17,21 @@
 .PARAMETER NoPush
     Do not push anything. Useful for a rehearsal.
 
+.PARAMETER CheckGates
+    Run the quality gates against the working tree and exit. No agent is invoked, so this
+    costs nothing but a test run. Useful to answer "is the repository healthy right now?"
+    without starting a maintenance pass.
+
 .EXAMPLE
     pwsh tools/schedule/run-pass.ps1
     pwsh tools/schedule/run-pass.ps1 -DryRun
+    pwsh tools/schedule/run-pass.ps1 -CheckGates
 #>
 [CmdletBinding()]
 param(
     [switch] $DryRun,
-    [switch] $NoPush
+    [switch] $NoPush,
+    [switch] $CheckGates
 )
 
 Set-StrictMode -Version Latest
@@ -58,6 +65,48 @@ function Write-Index {
     Add-Content -Path $IndexFile -Value ("{0} {1}" -f (Get-Date -Format 'yyyy-MM-ddTHH:mm:ssK'), $Message) -Encoding utf8
 }
 
+function Test-Gates {
+    <#
+        The quality gates from agents/maintenance/CHECKS.md, applied to whatever is currently
+        in the working tree.
+
+        The runner uses this before committing work an agent left behind. It must not publish
+        something the agent itself would have been forbidden to push: a runner that does that
+        turns "the gates failed" into a red main branch nobody notices.
+    #>
+    param([Parameter(Mandatory)][string] $RepoRoot)
+
+    $ok = $true
+
+    $jsFiles = Get-ChildItem -Path (Join-Path $RepoRoot 'packages') -Recurse -Filter '*.js' -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -notmatch '\\node_modules\\' }
+    foreach ($file in $jsFiles) {
+        & node --check $file.FullName 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Log "  syntax FAIL: $($file.FullName)" 'WARN'
+            & node --check $file.FullName 2>&1 | Select-Object -Last 5 | ForEach-Object { Write-Log "    $_" 'WARN' }
+            $ok = $false
+        }
+    }
+
+    $testOutput = & node --test "packages/core/**/*.test.js" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Log '  the test suite failed:' 'WARN'
+        $testOutput | Select-Object -Last 40 | ForEach-Object { Write-Log "    $_" 'WARN' }
+        $ok = $false
+    }
+
+    $exampleOutput = & node examples/two-agents/run.js 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Log '  the two-agents example failed:' 'WARN'
+        $exampleOutput | Select-Object -Last 30 | ForEach-Object { Write-Log "    $_" 'WARN' }
+        $ok = $false
+    }
+
+    if ($ok) { Write-Log 'all gates pass' }
+    return $ok
+}
+
 function Resolve-DshCommand {
     <#
         Locate the dsh launcher.
@@ -72,9 +121,9 @@ function Resolve-DshCommand {
 
         Search order, most explicit first:
           1. $env:COB_DSH                       — operator override
-          2. <log dir>\dsh-path.txt             — what the last successful run used
-          3. PATH
-          4. npm global prefix, %APPDATA%\npm   — a real install, if there is one
+          2. PATH
+          3. npm global prefix, %APPDATA%\npm   — a real install
+          4. <log dir>\dsh-path.txt             — what the last successful run used
           5. the npx cache, newest first        — works, but volatile: npm may prune it
     #>
     if ($env:COB_DSH) {
@@ -82,15 +131,6 @@ function Resolve-DshCommand {
             throw "COB_DSH is set to '$env:COB_DSH', which does not exist."
         }
         return $env:COB_DSH
-    }
-
-    $pinnedFile = Join-Path $LogDir 'dsh-path.txt'
-    if (Test-Path -LiteralPath $pinnedFile) {
-        $pinned = Get-Content -LiteralPath $pinnedFile -Raw -ErrorAction SilentlyContinue
-        if ($pinned) {
-            $pinned = $pinned.Trim()
-            if ($pinned -and (Test-Path -LiteralPath $pinned)) { return $pinned }
-        }
     }
 
     $onPath = Get-Command dsh -ErrorAction SilentlyContinue
@@ -104,6 +144,18 @@ function Resolve-DshCommand {
     if ($prefix) { $candidates += (Join-Path $prefix 'dsh.cmd') }
     foreach ($candidate in $candidates) {
         if ($candidate -and (Test-Path -LiteralPath $candidate)) { return $candidate }
+    }
+
+    # The pin is deliberately checked *after* a real install. It records whatever worked last
+    # time, which may well be the npx cache — a stable install must always beat a memory of a
+    # temporary one.
+    $pinnedFile = Join-Path $LogDir 'dsh-path.txt'
+    if (Test-Path -LiteralPath $pinnedFile) {
+        $pinned = Get-Content -LiteralPath $pinnedFile -Raw -ErrorAction SilentlyContinue
+        if ($pinned) {
+            $pinned = $pinned.Trim()
+            if ($pinned -and (Test-Path -LiteralPath $pinned)) { return $pinned }
+        }
     }
 
     if ($env:LOCALAPPDATA) {
@@ -137,6 +189,15 @@ try {
 
     Write-Log 'pulling'
     git pull --rebase --autostash 2>&1 | ForEach-Object { Write-Log "  $_" }
+
+    # ------------------------------------------------------------ gates only
+
+    if ($CheckGates) {
+        Write-Log 'running the quality gates only (-CheckGates); no agent will be invoked'
+        $gatesOk = Test-Gates -RepoRoot $RepoPath
+        Write-Index ("gates {0}" -f $(if ($gatesOk) { 'PASS' } else { 'FAIL' }))
+        exit $(if ($gatesOk) { 0 } else { 1 })
+    }
 
     # ------------------------------------------------------------ locate the agent
 
@@ -206,8 +267,9 @@ exactly one pass. When a decision is not yours to make, open an issue and stop.
     # ------------------------------------------------------------ ensure nothing is left behind
 
     $head = (git rev-parse --short HEAD)
-    git push 2>&1 | ForEach-Object { Write-Log "  $_" }
-    $headAfterPush = (git rev-parse --short HEAD)
+    if (-not $NoPush) {
+        git push 2>&1 | ForEach-Object { Write-Log "  $_" }
+    }
 
     $dirty = git status --porcelain
     $leftoverCommitted = $false
@@ -217,12 +279,7 @@ exactly one pass. When a decision is not yours to make, open an issue and stop.
         $dirty | ForEach-Object { Write-Log "  $_" 'WARN' }
 
         Write-Log 'checking whether the leftover work passes the gates'
-        $gatesOk = $true
-        $testOutput = & node --test "packages/core/**/*.test.js" 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            $gatesOk = $false
-            $testOutput | Select-Object -Last 40 | ForEach-Object { Write-Log "  $_" 'WARN' }
-        }
+        $gatesOk = Test-Gates -RepoRoot $RepoPath
 
         if ($gatesOk) {
             Write-Log 'gates pass; committing the leftover work so nothing stays local'
