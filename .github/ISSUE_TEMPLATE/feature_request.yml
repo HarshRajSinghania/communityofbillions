@@ -1,0 +1,74 @@
+name: Feature request
+description: Propose a change to the protocol or the implementation.
+title: "feat: "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This project is early. Design arguments are welcome and are the point.
+
+        One request per issue, please — a proposal that argues for two things usually loses both.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: |
+        Describe the situation that is currently impossible or painful. Concrete beats abstract:
+        "two agents on different hosts cannot agree on which of them proposed a price" is better
+        than "negotiation is hard".
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you propose
+      description: If this changes the wire format, sketch the message or the field.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What else you considered
+      description: Including "do nothing". Knowing why the obvious option fails is the useful part.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: layer
+    attributes:
+      label: Which layer does this touch?
+      options:
+        - L0 transport
+        - L1 identity
+        - L2 envelope
+        - L3 settlement
+        - L4 application / message types
+        - Tooling and documentation
+    validations:
+      required: true
+
+  - type: dropdown
+    id: wire
+    attributes:
+      label: Does this change the wire format?
+      options:
+        - "No"
+        - "Yes — additive (a new optional field or message type)"
+        - "Yes — breaking (existing envelopes would need to change)"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I read ROADMAP.md and this is not already planned.
+          required: true
+        - label: I searched the existing issues.
+          required: true

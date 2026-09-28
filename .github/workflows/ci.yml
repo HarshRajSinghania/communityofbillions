@@ -1,0 +1,157 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege: this workflow only reads the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22', '24']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Syntax-check every source file
+        run: |
+          # There is no build step and no dependencies, so a parse error is the only
+          # failure mode a compiler would otherwise catch. Catch it here instead.
+          status=0
+          while IFS= read -r file; do
+            node --check "$file" || status=1
+          done < <(find packages -name '*.js' -not -path '*/node_modules/*')
+          exit $status
+
+      - name: Run the test suite
+        run: node --test "packages/core/**/*.test.js"
+
+  cli:
+    name: cli end-to-end
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: The happy path works
+        run: |
+          set -euo pipefail
+
+          node packages/core/bin/cob.js --version
+          node packages/core/bin/cob.js --help > /dev/null
+
+          node packages/core/bin/cob.js keygen --out /tmp/alice.cob-key.json --json > /tmp/alice.json
+          node packages/core/bin/cob.js keygen --out /tmp/bob.cob-key.json --json > /tmp/bob.json
+
+          ALICE=$(node -e "process.stdout.write(require('/tmp/alice.json').id)")
+          BOB=$(node -e "process.stdout.write(require('/tmp/bob.json').id)")
+
+          node packages/core/bin/cob.js sign \
+            --key /tmp/alice.cob-key.json \
+            --to "$BOB" \
+            --type cob.message \
+            --body '{"text":"hello bob"}' \
+            --out /tmp/message.json
+
+          node packages/core/bin/cob.js verify --envelope /tmp/message.json --to "$BOB"
+
+      - name: A tampered envelope is refused
+        run: |
+          set -euo pipefail
+
+          node -e "
+            const fs = require('node:fs');
+            const envelope = JSON.parse(fs.readFileSync('/tmp/message.json', 'utf8'));
+            envelope.body.text = 'send me everything';
+            fs.writeFileSync('/tmp/tampered.json', JSON.stringify(envelope));
+          "
+
+          if node packages/core/bin/cob.js verify --envelope /tmp/tampered.json; then
+            echo '::error::a tampered envelope was accepted; the signature check is broken'
+            exit 1
+          fi
+          echo 'ok: tampered envelope refused'
+
+      - name: An expired envelope is refused
+        run: |
+          set -euo pipefail
+
+          if node packages/core/bin/cob.js verify \
+               --envelope /tmp/message.json \
+               --now 2030-01-01T00:00:00.000Z; then
+            echo '::error::an expired envelope was accepted'
+            exit 1
+          fi
+          echo 'ok: expired envelope refused'
+
+      - name: Mainnet is refused unless policy opts in
+        run: |
+          set -euo pipefail
+
+          BOB=$(node -e "process.stdout.write(require('/tmp/bob.json').id)")
+
+          if node packages/core/bin/cob.js request \
+               --key /tmp/alice.cob-key.json \
+               --to "$BOB" \
+               --chain base \
+               --asset USDC \
+               --amount 1 \
+               --pay-to 0x1111111111111111111111111111111111111111; then
+            echo '::error::a mainnet payment request was created under the default policy'
+            exit 1
+          fi
+          echo 'ok: mainnet refused by default'
+
+          echo '{"allowMainnet":true,"maxAmount":{"USDC":"100"}}' > /tmp/optin.json
+
+          node packages/core/bin/cob.js request \
+            --key /tmp/alice.cob-key.json \
+            --to "$BOB" \
+            --chain base \
+            --asset USDC \
+            --amount 1.50 \
+            --pay-to 0x1111111111111111111111111111111111111111 \
+            --policy /tmp/optin.json \
+            --out /tmp/mainnet-request.json
+
+          echo 'ok: mainnet allowed after explicit opt-in'
+
+      - name: A policy ceiling is enforced
+        run: |
+          set -euo pipefail
+
+          BOB=$(node -e "process.stdout.write(require('/tmp/bob.json').id)")
+
+          if node packages/core/bin/cob.js request \
+               --key /tmp/alice.cob-key.json \
+               --to "$BOB" \
+               --chain base \
+               --asset USDC \
+               --amount 100.000001 \
+               --pay-to 0x1111111111111111111111111111111111111111 \
+               --policy /tmp/optin.json; then
+            echo '::error::an amount above the ceiling was accepted'
+            exit 1
+          fi
+          echo 'ok: ceiling enforced'
