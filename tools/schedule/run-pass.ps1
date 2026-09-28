@@ -58,6 +58,64 @@ function Write-Index {
     Add-Content -Path $IndexFile -Value ("{0} {1}" -f (Get-Date -Format 'yyyy-MM-ddTHH:mm:ssK'), $Message) -Encoding utf8
 }
 
+function Resolve-DshCommand {
+    <#
+        Locate the dsh launcher.
+
+        This deliberately does NOT just call `Get-Command dsh`.
+
+        A `dsh` started through `npx` puts its own shim directory on PATH **for its children
+        only**. A task started by Windows Task Scheduler inherits the logon session's PATH,
+        which does not contain the npx cache. An earlier version of this script relied on
+        `Get-Command` alone and would have failed with "dsh not found" on the very first
+        unattended run — after reporting that everything was ready.
+
+        Search order, most explicit first:
+          1. $env:COB_DSH                       — operator override
+          2. <log dir>\dsh-path.txt             — what the last successful run used
+          3. PATH
+          4. npm global prefix, %APPDATA%\npm   — a real install, if there is one
+          5. the npx cache, newest first        — works, but volatile: npm may prune it
+    #>
+    if ($env:COB_DSH) {
+        if (-not (Test-Path -LiteralPath $env:COB_DSH)) {
+            throw "COB_DSH is set to '$env:COB_DSH', which does not exist."
+        }
+        return $env:COB_DSH
+    }
+
+    $pinnedFile = Join-Path $LogDir 'dsh-path.txt'
+    if (Test-Path -LiteralPath $pinnedFile) {
+        $pinned = Get-Content -LiteralPath $pinnedFile -Raw -ErrorAction SilentlyContinue
+        if ($pinned) {
+            $pinned = $pinned.Trim()
+            if ($pinned -and (Test-Path -LiteralPath $pinned)) { return $pinned }
+        }
+    }
+
+    $onPath = Get-Command dsh -ErrorAction SilentlyContinue
+    if ($onPath) { return $onPath.Source }
+
+    $prefix = $null
+    try { $prefix = (npm config get prefix 2>$null | Select-Object -First 1) } catch { }
+
+    $candidates = @()
+    if ($env:APPDATA) { $candidates += (Join-Path $env:APPDATA 'npm\dsh.cmd') }
+    if ($prefix) { $candidates += (Join-Path $prefix 'dsh.cmd') }
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) { return $candidate }
+    }
+
+    if ($env:LOCALAPPDATA) {
+        $pattern = Join-Path $env:LOCALAPPDATA 'npm-cache\_npx\*\node_modules\.bin\dsh.ps1'
+        $found = Get-ChildItem -Path $pattern -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending
+        if ($found) { return $found[0].FullName }
+    }
+
+    return $null
+}
+
 Write-Log "communityofbillions maintenance pass"
 Write-Log "repository : $RepoPath"
 Write-Log "log        : $PassLog"
@@ -79,6 +137,28 @@ try {
 
     Write-Log 'pulling'
     git pull --rebase --autostash 2>&1 | ForEach-Object { Write-Log "  $_" }
+
+    # ------------------------------------------------------------ locate the agent
+
+    # Resolved before the dry-run branch so that a dry run actually proves the thing most
+    # likely to be broken in an unattended context.
+    $dshPath = Resolve-DshCommand
+    if (-not $dshPath) {
+        Write-Log 'could not find the dsh launcher in any known location.' 'ERROR'
+        Write-Log '  set $env:COB_DSH to its full path, or install it globally:' 'ERROR'
+        Write-Log '    npm install -g @deepseek-ai/dsh' 'ERROR'
+        Write-Index 'ERROR dsh not found'
+        exit 2
+    }
+    Write-Log "agent      : $dshPath"
+
+    # Remember it, so the next run is deterministic even if PATH changes.
+    Set-Content -Path (Join-Path $LogDir 'dsh-path.txt') -Value $dshPath -Encoding utf8 -NoNewline
+
+    if ($dshPath -match '_npx') {
+        Write-Log 'note: this is an npx-cached copy. Working, but npm may prune it.' 'WARN'
+        Write-Log '      To make it permanent: npm install -g @deepseek-ai/dsh' 'WARN'
+    }
 
     # ------------------------------------------------------------ prompt
 
@@ -110,18 +190,11 @@ exactly one pass. When a decision is not yours to make, open an issue and stop.
 
     # ------------------------------------------------------------ run
 
-    $dsh = Get-Command dsh -ErrorAction SilentlyContinue
-    if (-not $dsh) {
-        Write-Log 'dsh was not found on PATH; cannot run a pass' 'ERROR'
-        Write-Index "ERROR dsh not found"
-        exit 2
-    }
-
     Write-Log 'invoking the agent (this can take a while)'
     $started = Get-Date
     $agentExit = 0
     try {
-        & dsh headless $prompt 2>&1 | Tee-Object -FilePath $PassLog -Append | ForEach-Object { Write-Host $_ }
+        & $dshPath headless $prompt 2>&1 | Tee-Object -FilePath $PassLog -Append | ForEach-Object { Write-Host $_ }
         $agentExit = $LASTEXITCODE
     } catch {
         Write-Log "the agent invocation failed: $($_.Exception.Message)" 'ERROR'
