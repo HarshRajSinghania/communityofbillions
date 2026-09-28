@@ -13,6 +13,8 @@ Testnet-first. Zero-dependency core. Spec-driven.
 [![Status: early](https://img.shields.io/badge/status-early%20development-red.svg)](ROADMAP.md)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
+**[Roadmap](ROADMAP.md) · [Project board](https://github.com/users/withinaz/projects/2) · [Specification](spec/COB-1.md) · [Issues](https://github.com/withinaz/communityofbillions/issues) · [Journal](JOURNAL.md)**
+
 </div>
 
 ---
@@ -132,6 +134,21 @@ agents/          Maintenance agent that keeps this repository alive
 examples/        Runnable two-agent scenarios
 JOURNAL.md       Public, append-only log of what changed and why
 ```
+
+## How this project is maintained
+
+This repository is kept alive by an automated maintenance agent that performs small, real increments
+three times a week and records what it did — including what it got wrong — in [JOURNAL.md](JOURNAL.md).
+Its brief, its quality gates, and its standing prohibitions are all public:
+
+- [agents/maintenance/README.md](agents/maintenance/README.md) — what it is and what it may do
+- [agents/maintenance/pass.md](agents/maintenance/pass.md) — the brief it runs under
+- [agents/maintenance/CHECKS.md](agents/maintenance/CHECKS.md) — what must pass before it commits
+- [tools/schedule/](tools/schedule/) — the runner and the scheduler setup
+
+It is instructed, in as many words, not to fabricate history, not to mark anything done without a
+test, and not to chase stars. If that ever stops being true, the commit history is where you will
+see it.
 
 ## Contributing
 
