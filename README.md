@@ -143,6 +143,7 @@ Its brief, its quality gates, and its standing prohibitions are all public:
 
 - [agents/maintenance/README.md](agents/maintenance/README.md) — what it is and what it may do
 - [agents/maintenance/pass.md](agents/maintenance/pass.md) — the brief it runs under
+- [agents/maintenance/DIRECTIVES.md](agents/maintenance/DIRECTIVES.md) — dated operator instructions that outrank the roadmap
 - [agents/maintenance/CHECKS.md](agents/maintenance/CHECKS.md) — what must pass before it commits
 - [tools/schedule/](tools/schedule/) — the runner and the scheduler setup
 
