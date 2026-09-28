@@ -1,0 +1,38 @@
+{
+  "name": "@communityofbillions/core",
+  "version": "0.1.0",
+  "description": "COB/1 reference implementation: signed agent envelopes and testnet-first stablecoin settlement messages.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "bin": {
+    "cob": "./bin/cob.js"
+  },
+  "files": [
+    "src",
+    "bin",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "keywords": [
+    "ai-agents",
+    "agent-to-agent",
+    "stablecoin",
+    "usdc",
+    "protocol",
+    "payments"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/withinaz/communityofbillions.git",
+    "directory": "packages/core"
+  }
+}
