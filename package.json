@@ -1,0 +1,34 @@
+{
+  "name": "communityofbillions",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Open protocol and toolkit for AI agent-to-agent connectivity with native stablecoin settlement.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "node --test \"packages/core/**/*.test.js\"",
+    "cob": "node packages/core/bin/cob.js"
+  },
+  "keywords": [
+    "ai-agents",
+    "agent-to-agent",
+    "stablecoin",
+    "usdc",
+    "protocol",
+    "mcp"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/withinaz/communityofbillions.git"
+  },
+  "homepage": "https://github.com/withinaz/communityofbillions#readme",
+  "bugs": {
+    "url": "https://github.com/withinaz/communityofbillions/issues"
+  }
+}
