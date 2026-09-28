@@ -18,7 +18,7 @@ cannot judge whether its history means anything.
 | **Quality gates** | [`CHECKS.md`](CHECKS.md) — what must pass before anything is committed |
 | **Runner** | [`../../tools/schedule/run-pass.ps1`](../../tools/schedule/run-pass.ps1) |
 | **Public record** | [`../../JOURNAL.md`](../../JOURNAL.md) and [`../../CHANGELOG.md`](../../CHANGELOG.md) |
-| **Private record** | A local log file, outside the repository, for the operator |
+| **Private record** | A local log directory outside the repository: `result.txt` — one line per pass, newest first — plus a verbose log per pass |
 
 ## What it is allowed to do
 

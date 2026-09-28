@@ -48,6 +48,7 @@ $LogDir = if ($env:COB_LOG_DIR) {
 }
 
 $IndexFile = Join-Path $LogDir 'maintenance.log'
+$ResultFile = Join-Path $LogDir 'result.txt'
 $Stamp = Get-Date -Format 'yyyy-MM-dd_HHmmss'
 $PassLog = Join-Path $LogDir "pass-$Stamp.log"
 
@@ -63,6 +64,45 @@ function Write-Log {
 function Write-Index {
     param([string] $Message)
     Add-Content -Path $IndexFile -Value ("{0} {1}" -f (Get-Date -Format 'yyyy-MM-ddTHH:mm:ssK'), $Message) -Encoding utf8
+}
+
+function Write-Result {
+    <#
+        Append one line to result.txt: the verdict of a pass, and nothing else.
+
+        The detailed logs exist and are verbose on purpose. This file answers one question —
+        "did the pass work?" — in a single line, newest first, so it can be read in a glance
+        without scrolling or parsing timestamps.
+
+            passe du mercredi 30/09/2026 09:04 -- ok
+            passe du lundi 05/10/2026 09:03 -- echec (les portes echouent)
+    #>
+    param([Parameter(Mandatory)][string] $Verdict)
+
+    # Day names are mapped explicitly rather than taken from the current culture: a scheduled
+    # task has no reliable UI culture, and an English day name in a French file is the kind of
+    # detail that makes a log feel untrustworthy.
+    $dayNames = @{
+        'Monday'    = 'lundi'
+        'Tuesday'   = 'mardi'
+        'Wednesday' = 'mercredi'
+        'Thursday'  = 'jeudi'
+        'Friday'    = 'vendredi'
+        'Saturday'  = 'samedi'
+        'Sunday'    = 'dimanche'
+    }
+
+    $now = Get-Date
+    $label = '{0} {1} {2}' -f $dayNames[$now.DayOfWeek.ToString()], $now.ToString('dd/MM/yyyy'), $now.ToString('HH:mm')
+    $line = "passe du $label -- $Verdict"
+
+    $previous = @()
+    if (Test-Path -LiteralPath $ResultFile) {
+        $previous = @(Get-Content -LiteralPath $ResultFile -ErrorAction SilentlyContinue | Where-Object { $_ -ne '' })
+    }
+
+    Set-Content -LiteralPath $ResultFile -Value (@($line) + $previous) -Encoding utf8
+    Write-Log "result     : $line"
 }
 
 function Test-Gates {
@@ -252,6 +292,7 @@ exactly one pass. When a decision is not yours to make, open an issue and stop.
     # ------------------------------------------------------------ run
 
     Write-Log 'invoking the agent (this can take a while)'
+    $headBeforeAgent = (git rev-parse --short HEAD)
     $started = Get-Date
     $agentExit = 0
     try {
@@ -308,6 +349,23 @@ exactly one pass. When a decision is not yours to make, open an issue and stop.
     Write-Log "  leftovers       : $(if ($dirty) { if ($leftoverCommitted) { 'committed and pushed' } else { 'LEFT DIRTY - human attention needed' } } else { 'none' })"
 
     Write-Index ("pass complete head={0} agentExit={1} leftovers={2}" -f $finalHead, $agentExit, $(if (-not $dirty) { 'none' } elseif ($leftoverCommitted) { 'committed' } else { 'DIRTY' }))
+
+    # ------------------------------------------------------------ verdict
+
+    # One line, for a human. Accents are avoided here on purpose: this string travels through
+    # a log file, a terminal, and possibly a copy-paste, and a mojibake verdict is worse than
+    # an unaccented one.
+    $verdict = if ($agentExit -ne 0) {
+        "echec (l'agent a quitte en code $agentExit)"
+    } elseif ($dirty -and -not $leftoverCommitted) {
+        'echec (les portes echouent, arbre laisse en place)'
+    } elseif ($finalHead -eq $headBeforeAgent) {
+        'ok (rien a faire)'
+    } else {
+        'ok'
+    }
+
+    Write-Result -Verdict $verdict
 
     exit $agentExit
 } finally {
