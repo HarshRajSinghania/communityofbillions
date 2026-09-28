@@ -1,0 +1,22 @@
+# Normalise line endings. The repository is written on Windows and consumed by CI on Linux;
+# without this, every checkout produces spurious whole-file diffs.
+* text=auto eol=lf
+
+# Files that must keep their bytes exactly.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
+
+# Lockfiles and generated fixtures: never show them in a diff review.
+package-lock.json linguist-generated=true
+pnpm-lock.yaml linguist-generated=true
+
+# Keep the journal and changelog out of the language statistics; they are not code.
+JOURNAL.md linguist-documentation
+CHANGELOG.md linguist-documentation
