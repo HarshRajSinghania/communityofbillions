@@ -14,6 +14,7 @@ cannot judge whether its history means anything.
 | **What** | An LLM agent invoked headlessly against this repository |
 | **Cadence** | Three passes a week — Monday, Wednesday, Friday, 09:00 local |
 | **Brief** | [`pass.md`](pass.md) — the full instruction, versioned with the code |
+| **Operator directives** | [`DIRECTIVES.md`](DIRECTIVES.md) — dated instructions that outrank everything else |
 | **Quality gates** | [`CHECKS.md`](CHECKS.md) — what must pass before anything is committed |
 | **Runner** | [`../../tools/schedule/run-pass.ps1`](../../tools/schedule/run-pass.ps1) |
 | **Public record** | [`../../JOURNAL.md`](../../JOURNAL.md) and [`../../CHANGELOG.md`](../../CHANGELOG.md) |

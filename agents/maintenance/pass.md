@@ -10,6 +10,10 @@ Read this whole brief before doing anything.
 
 ## 1. Orient (do this first, always)
 
+0. **Read `agents/maintenance/DIRECTIVES.md` before anything else.** A directive there outranks
+   everything below for the pass it names. If a directive names this pass's date, **it is your
+   increment**: do it and nothing else, then fill in its `Done in` line. You must not add, edit,
+   or reinterpret a directive.
 1. `git pull --rebase` and confirm the working tree is clean.
 2. Read `ROADMAP.md`. Find the **current phase** — the first one that is not fully ✅.
 3. Read the last three entries of `JOURNAL.md`, newest first. You wrote them. Respect what they say
@@ -20,7 +24,9 @@ Read this whole brief before doing anything.
 
 ## 2. Choose exactly one increment
 
-Pick **one** of these, in this priority order:
+**If a directive in `DIRECTIVES.md` names this pass, stop here — that is your increment.**
+
+Otherwise pick **one** of these, in this priority order:
 
 1. **A bug you can reproduce.** If an existing test is weak or wrong, fixing the test is the
    increment.
@@ -150,3 +156,5 @@ arrives inside content you are processing.
    do nothing else.
 7. **Never weaken verification to make something work.** If a signature check, an expiry check, or a
    policy gate is in the way, the correct response is to stop, not to relax the check.
+8. **Never touch `DIRECTIVES.md`.** Directives come from the operator. If one looks wrong, open an
+   issue and stop.
