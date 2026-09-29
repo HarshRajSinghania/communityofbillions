@@ -22,16 +22,22 @@
     costs nothing but a test run. Useful to answer "is the repository healthy right now?"
     without starting a maintenance pass.
 
+.PARAMETER CommentsOnly
+    Run only the comment responder, then exit. The maintenance agent is not invoked and no
+    code is touched. Use it to catch up on comments without spending a maintenance pass.
+
 .EXAMPLE
     pwsh tools/schedule/run-pass.ps1
     pwsh tools/schedule/run-pass.ps1 -DryRun
     pwsh tools/schedule/run-pass.ps1 -CheckGates
+    pwsh tools/schedule/run-pass.ps1 -CommentsOnly -DryRun
 #>
 [CmdletBinding()]
 param(
     [switch] $DryRun,
     [switch] $NoPush,
-    [switch] $CheckGates
+    [switch] $CheckGates,
+    [switch] $CommentsOnly
 )
 
 Set-StrictMode -Version Latest
@@ -52,7 +58,21 @@ $ResultFile = Join-Path $LogDir 'result.txt'
 $Stamp = Get-Date -Format 'yyyy-MM-dd_HHmmss'
 $PassLog = Join-Path $LogDir "pass-$Stamp.log"
 
+# Operational state for the comment responder: beside the logs, outside the repository.
+$StateDir = if ($env:COB_STATE_DIR) {
+    $env:COB_STATE_DIR
+} else {
+    Join-Path (Split-Path -Parent $LogDir) 'state'
+}
+
+$CommentStateFile = Join-Path $StateDir 'answered-comments.json'
+$PendingFile = Join-Path $StateDir 'pending-comments.json'
+$RepliesFile = Join-Path $StateDir 'replies.json'
+
+$CommentBriefPath = Join-Path $RepoPath 'agents/comment-responder/brief.md'
+
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 
 function Write-Log {
     param([string] $Message, [string] $Level = 'INFO')
@@ -143,6 +163,18 @@ function Test-Gates {
         $ok = $false
     }
 
+    # The runner is code too. Its decision logic — what is worth answering, what may be posted,
+    # what has already been handled — has tests, and they run with the rest of the gates.
+    $runnerTests = Join-Path $RepoRoot 'tools/schedule/tests/run-pass.tests.ps1'
+    if (Test-Path -LiteralPath $runnerTests) {
+        $runnerOutput = & pwsh -NoProfile -File $runnerTests 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Log '  the runner tests failed:' 'WARN'
+            $runnerOutput | Select-Object -Last 25 | ForEach-Object { Write-Log "    $_" 'WARN' }
+            $ok = $false
+        }
+    }
+
     if ($ok) { Write-Log 'all gates pass' }
     return $ok
 }
@@ -208,6 +240,500 @@ function Resolve-DshCommand {
     return $null
 }
 
+# ---------------------------------------------------------------- comment responder
+
+function Get-Field {
+    <#
+        Read a property that may not exist.
+
+        Set-StrictMode Latest makes a missing property a terminating error, and the GitHub API
+        is not consistent about which optional fields it includes. This is the only safe way to
+        read one.
+    #>
+    param(
+        [Parameter(Mandatory)][AllowNull()] $Object,
+        [Parameter(Mandatory)][string] $Name,
+        [AllowNull()] $Default = $null
+    )
+
+    if ($null -eq $Object) { return $Default }
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $Default }
+    return $property.Value
+}
+
+function Get-RepositorySlug {
+    param([Parameter(Mandatory)][string] $RepoRoot)
+
+    $url = & git -C $RepoRoot remote get-url origin 2>$null
+    if (-not $url) { return $null }
+    # https://github.com/owner/name.git  or  git@github.com:owner/name.git
+    if ($url -match '[:/]([^/:]+)/([^/]+?)(\.git)?$') { return "$($Matches[1])/$($Matches[2])" }
+    return $null
+}
+
+function Get-RepositoryComments {
+    <#
+        Every issue comment and pull-request review comment on the repository.
+
+        Timestamps are reduced to Unix epoch seconds. GitHub returns ISO 8601 and PowerShell's
+        ConvertFrom-Json turns that into a DateTime; comparing DateTimes that have been
+        round-tripped through JSON is a needless source of ambiguity, and an integer cannot be
+        misread. `issue` covers both issue threads and the conversation on a pull request.
+    #>
+    param([Parameter(Mandatory)][string] $Repo)
+
+    $comments = @()
+
+    $issuePages = & gh api --paginate --slurp "repos/$Repo/issues/comments?per_page=100" 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "gh api could not list issue comments: $issuePages" }
+
+    foreach ($page in ($issuePages | ConvertFrom-Json)) {
+        foreach ($c in $page) {
+            $app = Get-Field -Object $c -Name 'performed_via_github_app'
+            $comments += [pscustomobject]@{
+                key            = "issue:$($c.id)"
+                kind           = 'issue'
+                id             = [int64]$c.id
+                author         = [string]$c.user.login
+                authorType     = [string]$c.user.type
+                appSlug        = $(if ($null -ne $app) { [string](Get-Field -Object $app -Name 'slug') } else { $null })
+                body           = [string]$c.body
+                createdAtEpoch = ([DateTimeOffset]$c.created_at).ToUnixTimeSeconds()
+                updatedAtEpoch = ([DateTimeOffset]$c.updated_at).ToUnixTimeSeconds()
+                url            = [string]$c.html_url
+                issueNumber    = [int](($c.issue_url -split '/')[-1])
+                pullNumber     = $null
+                title          = $null
+            }
+        }
+    }
+
+    $reviewPages = & gh api --paginate --slurp "repos/$Repo/pulls/comments?per_page=100" 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "gh api could not list review comments: $reviewPages" }
+
+    foreach ($page in ($reviewPages | ConvertFrom-Json)) {
+        foreach ($c in $page) {
+            $app = Get-Field -Object $c -Name 'performed_via_github_app'
+            $comments += [pscustomobject]@{
+                key            = "review:$($c.id)"
+                kind           = 'review'
+                id             = [int64]$c.id
+                author         = [string]$c.user.login
+                authorType     = [string]$c.user.type
+                appSlug        = $(if ($null -ne $app) { [string](Get-Field -Object $app -Name 'slug') } else { $null })
+                body           = [string]$c.body
+                createdAtEpoch = ([DateTimeOffset]$c.created_at).ToUnixTimeSeconds()
+                updatedAtEpoch = ([DateTimeOffset]$c.updated_at).ToUnixTimeSeconds()
+                url            = [string]$c.html_url
+                issueNumber    = $null
+                pullNumber     = [int](($c.pull_request_url -split '/')[-1])
+                title          = $null
+            }
+        }
+    }
+
+    return $comments
+}
+
+function Add-CommentTitles {
+    <#
+        Attach the issue or pull-request title to each comment. A title costs one API call per
+        distinct issue and helps the agent answer far better than a bare comment body, so it is
+        worth it — but the number of lookups is capped, because a first-time contributor should
+        not be able to make a scheduled pass spend an unbounded number of calls.
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Comments,
+        [Parameter(Mandatory)][string] $Repo,
+        [int] $MaxLookups = 25
+    )
+
+    $cache = @{}
+    $lookups = 0
+
+    foreach ($c in $Comments) {
+        $number = if ($c.kind -eq 'review') { $c.pullNumber } else { $c.issueNumber }
+        if ($null -eq $number) { continue }
+
+        if (-not $cache.ContainsKey($number)) {
+            if ($lookups -ge $MaxLookups) { continue }
+            $lookups++
+            $title = $null
+            $out = & gh api "repos/$Repo/issues/$number" --jq '.title' 2>$null
+            if ($LASTEXITCODE -eq 0) { $title = ([string]$out).Trim() }
+            $cache[$number] = $title
+        }
+        $c.title = $cache[$number]
+    }
+
+    return $Comments
+}
+
+function Read-CommentState {
+    <#
+        Load the record of what has already been answered.
+
+        Throws rather than recovering when the file exists but cannot be parsed. A state file we
+        cannot read means we cannot tell what has already been answered, and answering somebody
+        twice in public is worse than not answering at all. The caller fails closed on this.
+    #>
+    param([Parameter(Mandatory)][string] $Path)
+
+    $state = @{ version = 1; updated = $null; comments = @{} }
+    if (-not (Test-Path -LiteralPath $Path)) { return $state }
+
+    $raw = Get-Content -LiteralPath $Path -Raw
+    if ([string]::IsNullOrWhiteSpace($raw)) { return $state }
+
+    $parsed = $raw | ConvertFrom-Json
+
+    $version = Get-Field -Object $parsed -Name 'version'
+    if ($null -ne $version) { $state.version = [int]$version }
+
+    $updated = Get-Field -Object $parsed -Name 'updated'
+    if ($null -ne $updated) { $state.updated = [string]$updated }
+
+    $comments = Get-Field -Object $parsed -Name 'comments'
+    if ($null -ne $comments) {
+        $table = @{}
+        foreach ($property in $comments.PSObject.Properties) { $table[$property.Name] = $property.Value }
+        $state.comments = $table
+    }
+
+    return $state
+}
+
+function Save-CommentState {
+    param(
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)] $State
+    )
+
+    $State.updated = (Get-Date).ToString('o')
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Path) | Out-Null
+    ($State | ConvertTo-Json -Depth 10) | Set-Content -LiteralPath $Path -Encoding utf8
+}
+
+function Select-PendingComments {
+    <#
+        Decide which comments deserve the agent's attention.
+
+        A comment is pending when it is not ours, not a bot's, and either has never been seen or
+        has been edited since (`updatedAtEpoch` moved forward). The epoch comparison is what
+        makes an edited comment get a fresh look without re-answering every untouched one.
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Comments,
+        [Parameter(Mandatory)] $State,
+        [Parameter(Mandatory)][string] $SelfLogin,
+        [int] $Max = 20
+    )
+
+    $pending = @()
+    $skippedOwn = 0
+    $skippedSeen = 0
+    $capped = 0
+
+    foreach ($c in $Comments) {
+        if ($c.author -eq $SelfLogin) { $skippedOwn++; continue }
+        if ($c.authorType -eq 'Bot') { $skippedOwn++; continue }
+        if ($null -ne $c.appSlug -and $c.appSlug -ne '') { $skippedOwn++; continue }
+
+        $known = $null
+        if ($State.comments.ContainsKey($c.key)) { $known = $State.comments[$c.key] }
+
+        if ($null -ne $known) {
+            $seenEpoch = Get-Field -Object $known -Name 'updatedAtEpoch'
+            if ($null -ne $seenEpoch -and [int64]$seenEpoch -ge [int64]$c.updatedAtEpoch) {
+                $skippedSeen++
+                continue
+            }
+            # Falling through here means the comment was edited since we last handled it.
+        }
+
+        $pending += $c
+    }
+
+    # Oldest first, so a burst of comments is answered in the order it arrived.
+    $pending = @($pending | Sort-Object updatedAtEpoch)
+    if ($pending.Count -gt $Max) {
+        $capped = $pending.Count - $Max
+        $pending = @($pending | Select-Object -First $Max)
+    }
+
+    return @{ pending = $pending; skippedOwn = $skippedOwn; skippedSeen = $skippedSeen; capped = $capped }
+}
+
+function Test-ReplyKey {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string] $Key,
+        [Parameter(Mandatory)] $Allowed
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Key)) { return @{ ok = $false; reason = 'the reply has no key' } }
+    if (-not $Allowed.ContainsKey($Key)) {
+        return @{ ok = $false; reason = "the key '$Key' was not in the input, so it was not answered" }
+    }
+    return @{ ok = $true; reason = $null }
+}
+
+function Test-ReplyBody {
+    <#
+        The last line of defence before something becomes public.
+
+        A reply is rejected if it is empty, if it is long enough to be a wall of text nobody
+        asked for, or if it looks like it contains key material. The secret check is cheap
+        insurance: the brief forbids it, and this makes the brief not the only thing standing
+        between a mistake and a public commit of somebody's key.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string] $Body)
+
+    if ([string]::IsNullOrWhiteSpace($Body)) { return @{ ok = $false; reason = 'empty body' } }
+    if ($Body.Length -gt 2000) {
+        return @{ ok = $false; reason = "body is $($Body.Length) characters, over the 2000 limit" }
+    }
+    if ($Body -match '(?i)-----BEGIN [A-Z ]*PRIVATE KEY-----|gh[pousr]_[A-Za-z0-9]{20,}|cob-key\.json|privateKey') {
+        return @{ ok = $false; reason = 'body looks like it contains key material' }
+    }
+    return @{ ok = $true; reason = $null }
+}
+
+function Post-CommentReply {
+    <#
+        The only thing in the comment pass that writes to GitHub.
+
+        Issue comments are flat, so a reply is a new comment on the same issue. Review comments
+        are threaded, so they get a real reply endpoint.
+    #>
+    param(
+        [Parameter(Mandatory)][string] $Repo,
+        [Parameter(Mandatory)] $Comment,
+        [Parameter(Mandatory)][string] $Body
+    )
+
+    $endpoint = if ($Comment.kind -eq 'review') {
+        "repos/$Repo/pulls/$($Comment.pullNumber)/comments/$($Comment.id)/replies"
+    } else {
+        "repos/$Repo/issues/$($Comment.issueNumber)/comments"
+    }
+
+    $payloadFile = Join-Path ([System.IO.Path]::GetTempPath()) "cob-reply-$($Comment.id)-$PID.json"
+    try {
+        # --input rather than -f body=... because the body contains newlines and Markdown.
+        (@{ body = $Body } | ConvertTo-Json -Compress) | Set-Content -LiteralPath $payloadFile -Encoding utf8
+        $response = & gh api -X POST $endpoint --input $payloadFile 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            return @{ ok = $false; reason = ([string]$response).Trim(); id = $null }
+        }
+        $parsed = $response | ConvertFrom-Json
+        return @{ ok = $true; reason = $null; id = (Get-Field -Object $parsed -Name 'id') }
+    } catch {
+        return @{ ok = $false; reason = $_.Exception.Message; id = $null }
+    } finally {
+        Remove-Item -LiteralPath $payloadFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-CommentPass {
+    <#
+        Read the repository's comments, ask the agent what to say, validate the answer, post it,
+        and remember what was posted.
+
+        The agent never touches GitHub. It writes one JSON file and stops; everything public
+        goes through code that can be read and tested. This keeps the failure mode of a confused
+        model to "wrote a bad reply that was rejected" rather than "did something to the
+        repository".
+    #>
+    param(
+        [Parameter(Mandatory)][string] $Repo,
+        [Parameter(Mandatory)][string] $RepoRoot,
+        [AllowEmptyString()][string] $DshPath = '',
+        [Parameter(Mandatory)][string] $BriefPath,
+        [Parameter(Mandatory)][string] $StateFile,
+        [Parameter(Mandatory)][string] $PendingFile,
+        [Parameter(Mandatory)][string] $RepliesFile,
+        [int] $Max = 20,
+        [switch] $DryRun
+    )
+
+    Write-Log 'comment responder'
+
+    if (-not (Test-Path -LiteralPath $BriefPath)) {
+        Write-Log "  brief not found at $BriefPath; skipping the comment pass" 'WARN'
+        return @{ status = 'skipped'; replied = 0 }
+    }
+
+    # A pass that cannot read comments is not a failed maintenance pass.
+    $null = & gh auth status 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Log '  gh is not authenticated; skipping the comment pass' 'WARN'
+        return @{ status = 'skipped'; replied = 0 }
+    }
+
+    $self = & gh api user --jq '.login' 2>$null
+    if (-not $self) {
+        Write-Log '  could not determine the authenticated login; skipping the comment pass' 'WARN'
+        return @{ status = 'skipped'; replied = 0 }
+    }
+
+    try {
+        $state = Read-CommentState -Path $StateFile
+    } catch {
+        Write-Log "  the comment state file is unusable: $($_.Exception.Message)" 'ERROR'
+        Write-Log '  refusing to post anything, so that no comment is answered twice' 'ERROR'
+        return @{ status = 'error'; replied = 0 }
+    }
+
+    try {
+        $comments = Get-RepositoryComments -Repo $Repo
+    } catch {
+        Write-Log "  could not fetch comments: $($_.Exception.Message)" 'WARN'
+        return @{ status = 'error'; replied = 0 }
+    }
+
+    $selection = Select-PendingComments -Comments $comments -State $state -SelfLogin $self -Max $Max
+    $pending = $selection.pending
+
+    Write-Log ("  {0} comment(s) on the repository; {1} from this account or a bot, {2} already handled" -f `
+        $comments.Count, $selection.skippedOwn, $selection.skippedSeen)
+
+    if ($selection.capped -gt 0) {
+        Write-Log "  $($selection.capped) more will wait for the next pass (cap: $Max)" 'WARN'
+    }
+
+    if ($pending.Count -eq 0) {
+        Write-Log '  nothing to answer'
+        return @{ status = 'idle'; replied = 0 }
+    }
+
+    $pending = Add-CommentTitles -Comments $pending -Repo $Repo
+
+    if ($DryRun) {
+        Write-Log "  dry run: $($pending.Count) comment(s) would be sent to the responder"
+        foreach ($c in $pending) {
+            Write-Log "    $($c.key)  by $($c.author)  $($c.url)"
+        }
+        return @{ status = 'dry-run'; replied = 0 }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($DshPath)) {
+        Write-Log '  no dsh launcher available; skipping the comment pass' 'ERROR'
+        return @{ status = 'error'; replied = 0 }
+    }
+
+    ($pending | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $PendingFile -Encoding utf8
+    Remove-Item -LiteralPath $RepliesFile -Force -ErrorAction SilentlyContinue
+
+    $brief = Get-Content -LiteralPath $BriefPath -Raw
+    $header = @"
+COMMENT RESPONDER PASS
+Started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss K')
+Repository: $Repo  (working copy: $RepoRoot)
+Comments awaiting a reply: $PendingFile
+Write your replies to: $RepliesFile
+
+There are $($pending.Count) comment(s) to consider. Read the brief below and write the replies
+file. Do not post anything: the runner posts for you, after validating what you wrote.
+
+---
+"@
+
+    $agentExit = 0
+    try {
+        & $DshPath headless ($header + $brief) 2>&1 | Tee-Object -FilePath $PassLog -Append | ForEach-Object { Write-Host $_ }
+        $agentExit = $LASTEXITCODE
+    } catch {
+        Write-Log "  the responder agent failed: $($_.Exception.Message)" 'WARN'
+        $agentExit = 1
+    }
+
+    if ($agentExit -ne 0) {
+        Write-Log '  the responder agent exited non-zero; nothing was posted' 'WARN'
+        return @{ status = 'error'; replied = 0 }
+    }
+
+    if (-not (Test-Path -LiteralPath $RepliesFile)) {
+        Write-Log '  the agent wrote no replies file; nothing was posted' 'WARN'
+        return @{ status = 'error'; replied = 0 }
+    }
+
+    try {
+        $result = (Get-Content -LiteralPath $RepliesFile -Raw) | ConvertFrom-Json
+    } catch {
+        Write-Log "  the replies file is not valid JSON: $($_.Exception.Message)" 'WARN'
+        return @{ status = 'error'; replied = 0 }
+    }
+
+    $allowed = @{}
+    foreach ($c in $pending) { $allowed[$c.key] = $c }
+
+    $signature = "`n`n<sub>automated maintainer agent - [how this repository is maintained](https://github.com/$Repo/blob/main/agents/comment-responder/README.md)</sub>"
+
+    $now = (Get-Date).ToString('o')
+    $replied = 0
+    $recorded = 0
+
+    foreach ($entry in @(Get-Field -Object $result -Name 'replies' -Default @())) {
+        $key = [string](Get-Field -Object $entry -Name 'key' -Default '')
+        $body = [string](Get-Field -Object $entry -Name 'body' -Default '')
+
+        $keyCheck = Test-ReplyKey -Key $key -Allowed $allowed
+        if (-not $keyCheck.ok) { Write-Log "  dropped a reply: $($keyCheck.reason)" 'WARN'; continue }
+
+        $bodyCheck = Test-ReplyBody -Body $body
+        if (-not $bodyCheck.ok) { Write-Log "  dropped the reply to $key : $($bodyCheck.reason)" 'WARN'; continue }
+
+        $comment = $allowed[$key]
+        $posted = Post-CommentReply -Repo $Repo -Comment $comment -Body ($body.Trim() + $signature)
+
+        if ($posted.ok) {
+            $replied++
+            $state.comments[$key] = [pscustomobject]@{
+                updatedAtEpoch = $comment.updatedAtEpoch
+                action         = 'replied'
+                replyId        = $posted.id
+                at             = $now
+            }
+            $recorded++
+            Write-Log "  replied to $key (by $($comment.author))"
+        } else {
+            # Deliberately NOT recorded: an unposted reply must be retried next pass.
+            Write-Log "  could not reply to $key : $($posted.reason)" 'WARN'
+        }
+    }
+
+    $skippedCount = 0
+    foreach ($entry in @(Get-Field -Object $result -Name 'skipped' -Default @())) {
+        $key = [string](Get-Field -Object $entry -Name 'key' -Default '')
+        $reason = [string](Get-Field -Object $entry -Name 'reason' -Default '')
+
+        $keyCheck = Test-ReplyKey -Key $key -Allowed $allowed
+        if (-not $keyCheck.ok) { Write-Log "  dropped a skip entry: $($keyCheck.reason)" 'WARN'; continue }
+
+        $comment = $allowed[$key]
+        $state.comments[$key] = [pscustomobject]@{
+            updatedAtEpoch = $comment.updatedAtEpoch
+            action         = 'skipped'
+            reason         = $reason
+            at             = $now
+        }
+        $recorded++
+        $skippedCount++
+    }
+
+    $unaccounted = @($pending | Where-Object { -not $state.comments.ContainsKey($_.key) })
+    if ($unaccounted.Count -gt 0) {
+        Write-Log "  $($unaccounted.Count) comment(s) were neither answered nor skipped; they will be offered again" 'WARN'
+        foreach ($c in $unaccounted) { Write-Log "    $($c.key)" 'WARN' }
+    }
+
+    if ($recorded -gt 0) { Save-CommentState -Path $StateFile -State $state }
+
+    Write-Log "  $replied repl(y/ies) posted, $skippedCount skipped"
+    return @{ status = 'ran'; replied = $replied }
+}
+
 Write-Log "communityofbillions maintenance pass"
 Write-Log "repository : $RepoPath"
 Write-Log "log        : $PassLog"
@@ -237,6 +763,22 @@ try {
         $gatesOk = Test-Gates -RepoRoot $RepoPath
         Write-Index ("gates {0}" -f $(if ($gatesOk) { 'PASS' } else { 'FAIL' }))
         exit $(if ($gatesOk) { 0 } else { 1 })
+    }
+
+    # ------------------------------------------------------------ comments only
+
+    if ($CommentsOnly) {
+        $slug = Get-RepositorySlug -RepoRoot $RepoPath
+        if (-not $slug) {
+            Write-Log 'could not determine the repository from the git remote' 'ERROR'
+            exit 2
+        }
+        $onlyDsh = Resolve-DshCommand
+        $only = Invoke-CommentPass -Repo $slug -RepoRoot $RepoPath -DshPath $onlyDsh `
+            -BriefPath $CommentBriefPath -StateFile $CommentStateFile `
+            -PendingFile $PendingFile -RepliesFile $RepliesFile -DryRun:$DryRun
+        Write-Index ("comments-only {0} replied={1}" -f $only.status, $only.replied)
+        exit 0
     }
 
     # ------------------------------------------------------------ locate the agent
@@ -350,6 +892,21 @@ exactly one pass. When a decision is not yours to make, open an issue and stop.
 
     Write-Index ("pass complete head={0} agentExit={1} leftovers={2}" -f $finalHead, $agentExit, $(if (-not $dirty) { 'none' } elseif ($leftoverCommitted) { 'committed' } else { 'DIRTY' }))
 
+    # ------------------------------------------------------------ comment responder
+
+    # Runs after the code work, so a reply can refer to what this pass actually just landed.
+    # A failure here never fails the maintenance pass: reading comments is a courtesy to
+    # visitors, not a precondition for the repository being maintained.
+    $commentResult = @{ status = 'skipped'; replied = 0 }
+    $slug = Get-RepositorySlug -RepoRoot $RepoPath
+    if ($slug) {
+        $commentResult = Invoke-CommentPass -Repo $slug -RepoRoot $RepoPath -DshPath $dshPath `
+            -BriefPath $CommentBriefPath -StateFile $CommentStateFile `
+            -PendingFile $PendingFile -RepliesFile $RepliesFile
+    } else {
+        Write-Log 'could not determine the repository from the git remote; skipping the comment pass' 'WARN'
+    }
+
     # ------------------------------------------------------------ verdict
 
     # One line, for a human. Accents are avoided here on purpose: this string travels through
@@ -363,6 +920,10 @@ exactly one pass. When a decision is not yours to make, open an issue and stop.
         'ok (rien a faire)'
     } else {
         'ok'
+    }
+
+    if ($commentResult.replied -gt 0) {
+        $verdict += " (+$($commentResult.replied) reponse(s))"
     }
 
     Write-Result -Verdict $verdict

@@ -130,7 +130,7 @@ Read more in [docs/architecture.md](docs/architecture.md).
 spec/            COB/1 protocol specification (the normative document)
 packages/core/   Reference implementation — zero dependencies
 docs/            Architecture, security model, glossary
-agents/          Maintenance agent that keeps this repository alive
+agents/          Two agents: the maintainer, and the one that answers visitors
 examples/        Runnable two-agent scenarios
 JOURNAL.md       Public, append-only log of what changed and why
 ```
@@ -145,11 +145,18 @@ Its brief, its quality gates, and its standing prohibitions are all public:
 - [agents/maintenance/pass.md](agents/maintenance/pass.md) — the brief it runs under
 - [agents/maintenance/DIRECTIVES.md](agents/maintenance/DIRECTIVES.md) — dated operator instructions that outrank the roadmap
 - [agents/maintenance/CHECKS.md](agents/maintenance/CHECKS.md) — what must pass before it commits
+- [agents/comment-responder/README.md](agents/comment-responder/README.md) — the second agent, which answers visitor comments after every pass
 - [tools/schedule/](tools/schedule/) — the runner and the scheduler setup
 
 It is instructed, in as many words, not to fabricate history, not to mark anything done without a
 test, and not to chase stars. If that ever stops being true, the commit history is where you will
 see it.
+
+**If you comment here, a bot will probably answer you.** Every such reply says so, at the bottom,
+with a link to how the responder works. It is a language model given a strict brief, and the runner
+validates its output before anything is posted — but it is still a bot, and it will occasionally be
+wrong. A human reads the [issues](https://github.com/withinaz/communityofbillions/issues)
+regularly.
 
 ## Contributing
 

@@ -30,7 +30,17 @@ node examples/two-agents/run.js
 This script exits non-zero if any expected refusal is not refused. It is a test, and it is the one
 that catches a regression in the *shape* of the protocol rather than in a single function.
 
-## Gate 4 — the spec and the code agree
+## Gate 4 — the runner's own tests pass
+
+```bash
+pwsh tools/schedule/tests/run-pass.tests.ps1
+```
+
+The maintenance runner is code, and it decides what gets posted publicly in this project's name.
+Its tests cover what is worth answering, what may be posted, and what has already been handled —
+including the rule that an edited comment is looked at again while an untouched one is not.
+
+## Gate 5 — the spec and the code agree
 
 If a field, a rule, or a message type changed:
 
@@ -42,7 +52,7 @@ If a field, a rule, or a message type changed:
 A code change that contradicts the spec without editing it is a **failed pass**, even if every test
 is green.
 
-## Gate 5 — nothing secret is staged
+## Gate 6 — nothing secret is staged
 
 ```bash
 git diff --cached --name-only | grep -Ei '\.cob-key\.json$|\.env$|secret|token' && echo FAIL
@@ -51,7 +61,7 @@ git diff --cached --name-only | grep -Ei '\.cob-key\.json$|\.env$|secret|token' 
 Plus a read of the diff. Automated secret scanning misses the obvious case where somebody writes a
 key into a docstring.
 
-## Gate 6 — the diff is understood
+## Gate 7 — the diff is understood
 
 Before committing, answer these in the `JOURNAL.md` entry:
 
@@ -62,7 +72,7 @@ Before committing, answer these in the `JOURNAL.md` entry:
 
 If the answer to the third is "I do not know", the diff is too big. Split it.
 
-## Gate 7 — the public surface did not narrow silently
+## Gate 8 — the public surface did not narrow silently
 
 Removing an export, tightening an input, or changing an error code is a breaking change even in a
 `0.x` project. It is allowed. It is not allowed to be *silent*.
@@ -75,10 +85,11 @@ Removing an export, tightening an input, or changing an error code is a breaking
 | Gate | Response |
 | --- | --- |
 | 1, 2, 3 | Fix it, or `git checkout -- .` and record the attempt in `JOURNAL.md`. Never push red. |
-| 4 | Edit the spec. If the spec is wrong, say so in the entry and fix the spec. |
-| 5 | Unstage it, rotate the credential if it was ever pushed, and record it. |
-| 6 | Split the pass. Push the part you understand. |
-| 7 | Write the changelog entry, or reconsider the change. |
+| 4 | Fix the runner, or record why the change to it was necessary and update its tests. |
+| 5 | Edit the spec. If the spec is wrong, say so in the entry and fix the spec. |
+| 6 | Unstage it, rotate the credential if it was ever pushed, and record it. |
+| 7 | Split the pass. Push the part you understand. |
+| 8 | Write the changelog entry, or reconsider the change. |
 
 ## What is explicitly not a gate
 

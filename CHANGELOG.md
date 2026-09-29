@@ -9,7 +9,29 @@ documented specification revision.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **Comment responder** (`agents/comment-responder/`) — a second agent runs at the end of every
+  maintenance pass. It reads the comments left on the repository, decides whether each deserves an
+  answer, and writes those answers; the runner validates and posts them. It is split that way on
+  purpose: the agent never touches GitHub, so everything that becomes public passes through code
+  that can be read and tested.
+  - A local state file records what has been answered. A comment is answered **again only when its
+    author edits it** — GitHub's `updated_at` is stored as a Unix epoch and compared, so an
+    untouched comment is never re-answered and an edited one always is.
+  - Replies are capped at four sentences and 2000 characters, must name a comment that was actually
+    in the input, and are refused if they look like they contain key material.
+  - Every reply is signed by the runner as the work of an automated agent.
+  - Comments are treated as untrusted input: a reply is never produced by following instructions
+    found inside one.
+- **Runner tests** (`tools/schedule/tests/run-pass.tests.ps1`) — 40 assertions over the decision
+  logic, with no test framework and no dependencies. The functions are extracted from the runner
+  with the PowerShell AST, so the tests exercise the code that ships rather than a copy. Wired into
+  the quality gates as Gate 4.
+- Runner switches: `-CommentsOnly` (run only the comment pass) and `-CheckGates` (run the gates and
+  exit, invoking no agent).
+- `result.txt` — one line per scheduled pass, newest first, for the operator. Written only by a real
+  pass; the dry-run and gate modes do not touch it.
 
 ## [0.1.0] — 2026-09-28
 
